@@ -1,42 +1,35 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/tls"
-	"encoding/base64"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
-	"os"
-	"path/filepath"
+
+	// "strings"
+	"os" // Import the os package
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/gofiber/fiber/v2"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq" // Import the PostgreSQL driver
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
-func loadEnv() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
-	}
-}
-
 var (
-	batchSize     = 1
+	// ... (variables)
+	batchSize     = 1 // Set the batch size
 	batchMessages []string
 )
+var db *sql.DB
 
-// var producer sarama.SyncProducer // Upstash Kafka producer
+type RequestBody struct {
+	Project string `json:"project"`
+	UserID  string `json:"userId"`
+}
 
 type InfoData struct {
 	ActivityUUID       string    `json:"activity_uuid"`
@@ -46,7 +39,6 @@ type InfoData struct {
 	AppName            string    `json:"app_name"`
 	URL                string    `json:"url"`
 	PageTitle          string    `json:"page_title"`
-	Screenshot         string    `json:"screenshot"`
 	ProductivityStatus string    `json:"productivity_status"`
 	Meridian           string    `json:"meridian"`
 	IPAddress          string    `json:"ip_address"`
@@ -60,205 +52,201 @@ type InfoData struct {
 	ScreenshotUID      string    `json:"screenshot_uid"`
 }
 
-// processData handles the common logic for processing InfoData, whether it comes from a single object or an array.
-func processData(infoData InfoData, ctx *fiber.Ctx) error {
-	// Your logic for processing each InfoData, including uploading to Wasabi and sending to Kafka
-	// Note: This function should NOT directly interact with `ctx`.
-	// Instead, return errors for the caller to handle appropriately.
-
-	// Example:
-	err := uploadToWasabi(infoData, ctx)
-	if err != nil {
-		return fmt.Errorf("failed to upload to Wasabi: %v", err)
-	}
-
-	message, err := json.Marshal(infoData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal infoData to JSON: %v", err)
-	}
-
-	// Assuming you have adapted your sendToKafka function to not require ctx as an argument
-	err = sendToKafka(message, ctx)
-	if err != nil {
-		return fmt.Errorf("failed to send message to Kafka: %v", err)
-	}
-
-	return nil
-}
-
 func main() {
-	app := fiber.New()
-	loadEnv()
+	// PostgreSQL connection string
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
+	connStr := os.Getenv("POSTGRES_CONN_STR")
 
-	app.Post("/produce", func(ctx *fiber.Ctx) error {
-		body := ctx.Body()
+	// connStr := "f7hiu7ql46m8ev2cpbp1:pscale_pw_5Hr2xQwvZQYg83n069wNs7dNAreLmYq302zM9rlRLSG@tcp(aws.connect.psdb.cloud)/tracktime?tls=true&interpolateParams=true"
 
-		// Try to unmarshal the body into a single InfoData struct
-		var singleInfoData InfoData
-		if err := json.Unmarshal(body, &singleInfoData); err == nil {
-			// Handle single object
-			if err := processData(singleInfoData, ctx); err != nil {
-				log.Println("Error processing InfoData:", err)
-				return ctx.Status(fiber.StatusInternalServerError).SendString(err.Error())
-			}
-			return ctx.SendString("Data processed successfully")
-		}
+	// Establish a database connection
+	fmt.Println(connStr)
+	// Connect to the PostgreSQL database
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		panic(err) // Print and exit on error
+	}
+	defer db.Close()
 
-		// Try to unmarshal the body into a slice of InfoData structs
-		var multipleInfoData []InfoData
-		if err := json.Unmarshal(body, &multipleInfoData); err == nil {
-			// Handle array of objects
-			for _, data := range multipleInfoData {
-				if err := processData(data, ctx); err != nil {
-					log.Println("Error processing InfoData:", err)
-					return ctx.Status(fiber.StatusInternalServerError).SendString(err.Error())
-				}
-			}
-			return ctx.SendString("All data processed successfully")
-		}
+	// Check if the connection is successful
+	if err := db.Ping(); err != nil {
+		fmt.Println("Error connecting to the database:", err)
+		return
+	}
 
-		// If neither unmarshalling succeeded
-		return ctx.Status(fiber.StatusBadRequest).SendString("Invalid JSON format")
-	})
+	fmt.Println("Connected to the database")
+	// Check if we're connected
+	// err = db.Ping()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// defer db.Close()
 
-	log.Fatal(app.Listen(":8080"))
-}
-
-func sendToKafka(message []byte, ctx *fiber.Ctx) error {
-
+	// Kafka settings
 	mechanism, err := scram.Mechanism(scram.SHA512, "c21pbGluZy1naWJib24tNjc4OSSKcT9_efyCQyls2uRGWVqeWwlnKZJuIrKK-Mg", "OWJjOTVjMDUtYTE2My00NGU5LTg4ODMtOWE4ZjRhZjEyMmU4")
 	if err != nil {
-		log.Fatalf("Error creating SCRAM mechanism: %v", err)
+		log.Fatalln(err)
 	}
 
-	writerConfig := kafka.WriterConfig{
-		Brokers: []string{"smiling-gibbon-6789-us1-kafka.upstash.io:9092"},
-		Topic:   "kafka_test",
-		Dialer: &kafka.Dialer{
-			SASLMechanism: mechanism,
-			TLS:           &tls.Config{},
-		},
+	dialer := &kafka.Dialer{
+		SASLMechanism: mechanism,
+		TLS:           &tls.Config{},
 	}
 
-	kafkaWriter := kafka.NewWriter(writerConfig)
-	defer kafkaWriter.Close()
+	topic := "kafka_test" // Replace with your topic name
+	// partition := 0
 
-	// Produce the message to Kafka
-	err = kafkaWriter.WriteMessages(ctx.Context(), kafka.Message{
-		Value: message,
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{"smiling-gibbon-6789-us1-kafka.upstash.io:9092"}, // Replace with your Upstash Kafka broker endpoint
+		GroupID: "test_kafka",
+		Topic:   topic,
+		Dialer:  dialer,
 	})
+	defer r.Close()
 
+	// ctx, cancel := context.WithTimeout(context.Background(), time.Second*300)
+	// defer cancel()
+	// Kafka consumer loop
+	for {
+		// Set a context with timeout for each read operation
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*300) // Example: 5-second timeout
+		select {
+		case <-time.After(time.Millisecond * 100): // Check for message periodically
+			m, err := r.ReadMessage(ctx)
+
+			if err != nil {
+				if err == context.DeadlineExceeded {
+					fmt.Println("Context deadline exceeded while reading Kafka message")
+				} else {
+					fmt.Println("Error reading Kafka message:", err)
+				}
+				cancel()
+				break // Break the select, not the for loop
+			}
+
+			fmt.Println("Received message:", string(m.Value))
+			batchMessages = append(batchMessages, string(m.Value)) // accumulate messages in the batch
+
+			if len(batchMessages) >= batchSize {
+				// Process the batch when it reaches the desired size
+				processBatch(db, batchMessages)
+				batchMessages = nil // reset the batch
+			}
+			// Process the received message
+
+			cancel() // Cancel the context after processing the message
+
+		case <-ctx.Done():
+			// Context was cancelled, possibly due to timeout
+			fmt.Println("Context canceled or deadline exceeded")
+			cancel()
+			continue // Continue to the next iteration of the loop
+		}
+	}
+}
+
+func processBatch(db *sql.DB, messages []string) {
+	for _, message := range messages {
+		var infoData InfoData
+		if err := json.Unmarshal([]byte(message), &infoData); err != nil {
+			log.Printf("Error unmarshalling message: %v\n", err)
+			continue // Skip to the next message if there's an error
+		}
+
+		if err := insertOrUpdateProject(db, infoData); err != nil {
+			log.Printf("Error inserting/updating data: %v\n", err)
+			// Consider whether to continue or return/exit based on your error handling policy
+		}
+		confirmDataAdded(db)
+	}
+}
+
+func createNewTable(db *sql.DB) error {
+	connStr := os.Getenv("MYSQL_CONN_STR")
+	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to produce message to Kafka: " + err.Error())
+		return err
+	}
+	defer db.Close()
+
+	createTableSQL := `
+    CREATE TABLE IF NOT EXISTS user_activity (
+        activity_uuid VARCHAR(255) PRIMARY KEY,
+        user_uid VARCHAR(255),
+        organization_id VARCHAR(255),
+        timestamp DATETIME,
+        app_name VARCHAR(255),
+        url VARCHAR(255),
+        page_title VARCHAR(255),
+        productivity_status VARCHAR(255),
+        meridian VARCHAR(255),
+        ip_address VARCHAR(255),
+        mac_address VARCHAR(255),
+        mouse_movement BOOLEAN,
+        mouse_clicks INT,
+        keys_clicks INT,
+        status INT,
+        cpu_usage VARCHAR(255),
+        ram_usage VARCHAR(255),
+        screenshot_uid VARCHAR(255)
+    );`
+
+	_, err = db.Exec(createTableSQL)
+	if err != nil {
+		return err
 	}
 
-	fmt.Println("Message produced to Kafka.")
-
+	fmt.Println("Table 'user_activity' created successfully.")
 	return nil
 }
 
-func uploadToWasabi(infoData InfoData, ctx *fiber.Ctx) error {
-	// Assuming AWS session setup is correct and unchanged
-
-	decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Screenshot)
+func fetchData(db *sql.DB) {
+	rows, err := db.Query("SELECT * FROM user_activity")
 	if err != nil {
-		return fmt.Errorf("failed to decode base64 screenshot: %v", err)
+		panic(err)
 	}
-	// // Specify the local directory where screenshots will be saved
-	localDir := "./screenshots"
-	if err := os.MkdirAll(localDir, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create local directory: %v", err)
-	}
+	defer rows.Close()
 
-	// Create a unique filename for the local screenshot
-	localFilePath := filepath.Join(localDir, fmt.Sprintf("%s.png", infoData.ActivityUUID))
-
-	// Save the screenshot locally
-	if err := ioutil.WriteFile(localFilePath, decodedScreenshot, 0644); err != nil {
-		return fmt.Errorf("failed to save screenshot locally: %v", err)
-	}
-	log.Printf("Screenshot saved locally: %s", localFilePath)
-
-	screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".png"
-
-	wasabiEndpoint := os.Getenv("S3_ENDPOINT")
-	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY")
-	wasabiSecretKey := os.Getenv("WASABI_SECRET_KEY")
-	wasabiBucket := os.Getenv("WASABI_BUCKET_NAME")
-
-	// wasabiObjectKey := "screenshots/" + time.Now().Format("2006-01-02/15-04-05") + ".png"
-
-	fmt.Println("Connecting to Wasabi...")
-
-	// Customize the HTTP client for AWS session with a timeout
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second, // Set the desired timeout duration here
-	}
-
-	awsConfig := &aws.Config{
-		Region:           aws.String("us-west-1"), // Make sure to use the correct region
-		Credentials:      credentials.NewStaticCredentials(wasabiAccessKey, wasabiSecretKey, ""),
-		Endpoint:         aws.String(wasabiEndpoint),
-		DisableSSL:       aws.Bool(true),
-		S3ForcePathStyle: aws.Bool(true),
-		HTTPClient:       httpClient, // Use the custom HTTP client with timeout
-	}
-
-	// Create a new AWS session using the customized awsConfig
-	sess, err := session.NewSession(awsConfig)
-	if err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to create AWS session: " + err.Error())
-	}
-
-	// Create an S3 client
-	s3Client := s3.New(sess)
-
-	fmt.Println("Connected to Wasabi.")
-
-	// Create a bucket if it doesn't exist
-	_, err = s3Client.CreateBucket(&s3.CreateBucketInput{
-		Bucket: aws.String(wasabiBucket),
-	})
-	fmt.Println("Image uploading to wasabi.....")
-
-	// if err != nil {
-	// 	return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to create Wasabi bucket: " + err.Error())
-	// }
-
-	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok {
-			// Prints out the AWS error code and message
-			log.Printf("AWS Error: %s - %s", awsErr.Code(), awsErr.Message())
-			if reqErr, ok := err.(awserr.RequestFailure); ok {
-				// A RequestFailure is an AWS error with additional information like status code
-				log.Printf("Request Error: Code - %d, Request ID - %s", reqErr.StatusCode(), reqErr.RequestID())
-			}
-		} else {
-			// Generic error handling
-			log.Printf("Error: %s", err.Error())
+	// Iterate through the result rows and print the data
+	for rows.Next() {
+		var user_title, mac_address, usb_info, user_app_name, user_process_id, user_window_id, img_id string
+		var id int
+		if err := rows.Scan(&id, &user_title, &mac_address, &usb_info, &user_app_name, &user_process_id, &user_window_id, &img_id); err != nil {
+			panic(err)
 		}
-		return fmt.Errorf("failed to upload screenshot to Wasabi: %v", err)
+		fmt.Println(id, user_title, mac_address, usb_info, user_app_name, user_process_id, user_window_id, img_id) // Replace with your actual column names
 	}
 
-	fmt.Println("Image uploading Started")
+	if err := rows.Err(); err != nil {
+		panic(err)
+	}
+}
 
-	// screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + ".png"
+func insertOrUpdateProject(db *sql.DB, data InfoData) error {
+	sqlStatement := `
+    INSERT INTO user_activity (activity_uuid, user_uid, organization_id, timestamp, app_name, url, page_title, productivity_status, meridian, ip_address, mac_address, mouse_movement, mouse_clicks, keys_clicks, status, cpu_usage, ram_usage, screenshot_uid)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
 
-	// Upload the screenshot to Wasabi
-	_, err = s3Client.PutObject(&s3.PutObjectInput{
-		Bucket:      aws.String(wasabiBucket),
-		Key:         aws.String(screenshotObjectKey),
-		Body:        bytes.NewReader(decodedScreenshot),
-		ContentType: aws.String("image/png"),
-	})
-
+	_, err := db.Exec(sqlStatement, data.ActivityUUID, data.UserUID, data.OrganizationID, data.Timestamp, data.AppName, data.URL, data.PageTitle, data.ProductivityStatus, data.Meridian, data.IPAddress, data.MacAddress, data.MouseMovement, data.MouseClicks, data.KeysClicks, data.Status, data.CPUUsage, data.RAMUsage, data.ScreenshotUID)
 	if err != nil {
-		return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload screenshot to Wasabi: " + err.Error())
+		return err
 	}
 
-	fmt.Println("Image uploaded")
-
-	// Upload the screenshot to Wasabi as before
-	log.Printf("Screenshot uploaded to Wasabi: %s", screenshotObjectKey)
+	fmt.Println("Data inserted successfully.")
 	return nil
+}
+
+func confirmDataAdded(db *sql.DB) {
+	query := "SELECT COUNT(*) FROM user_activity"
+	var count int
+	err := db.QueryRow(query).Scan(&count)
+	if err != nil {
+		log.Fatalf("Error querying the database: %v", err)
+	}
+
+	fmt.Printf("Number of records in user_activity table: %d\n", count)
 }
