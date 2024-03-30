@@ -67,6 +67,7 @@ type InfoData struct {
     CPUUsage           string    `json:"cpu_usage"`
     RAMUsage           string    `json:"ram_usage"`
     ScreenshotUID      string    `json:"screenshot_uid"`
+    Device_user_name   string    `json:"device_user_name"`
 }
 
 // processData handles the common logic for processing InfoData, whether it comes from a single object or an array.
