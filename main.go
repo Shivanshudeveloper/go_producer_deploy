@@ -48,7 +48,7 @@ var (
 
 type InfoData struct {
     ActivityUUID       string    `json:"activity_uuid"`
-    UserUID            string    `json:"user_uid"`
+    UserUID            string    `json:"user_id"`
     OrganizationID     string    `json:"organization_id"`
     Timestamp          time.Time `json:"timestamp"`
     AppName            string    `json:"app_name"`
@@ -205,8 +205,12 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
     log.Printf("Screenshot saved locally: %s", localFilePath)
 
     // screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|"+ infoData.UserUID + ".png"
-    log.Printf("screenshot name",infoData.ScreenshotUID)
-    screenshotObjectKey := infoData.ScreenshotUID;
+    log.Printf("screenshot name",infoData.ScreenshotUID);
+
+    // log.Printf("data",infoData.ActivityUUID,infoData.UserUID)
+    // screenshotObjectKey := infoData.ScreenshotUID;
+    screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg";
+    log.Printf("infoData",infoData.ActivityUUID,infoData.UserUID,infoData.OrganizationID)
 
 	wasabiEndpoint := os.Getenv("S3_ENDPOINT");
 	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY"); 
