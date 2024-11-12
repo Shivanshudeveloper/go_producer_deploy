@@ -144,14 +144,18 @@ func main() {
 
 func sendToKafka(message []byte, ctx *fiber.Ctx) error {
 	
-	mechanism, err := scram.Mechanism(scram.SHA512, "c21pbGluZy1naWJib24tNjc4OSSKcT9_efyCQyls2uRGWVqeWwlnKZJuIrKK-Mg", "OWJjOTVjMDUtYTE2My00NGU5LTg4ODMtOWE4ZjRhZjEyMmU4")
+    userName := "trackTIme-2"
+    password := "9g72zV0EcLbA50v6jnnmfiFRvwqUKZ"
+	mechanism, err := scram.Mechanism(scram.SHA256, userName, password)
+    // userName := trackTIme-2
+    // password :-9g72zV0EcLbA50v6jnnmfiFRvwqUKZ
 		if err != nil {
 			log.Fatalf("Error creating SCRAM mechanism: %v", err)
 		}
 
 		writerConfig := kafka.WriterConfig{
-			Brokers: []string{"smiling-gibbon-6789-us1-kafka.upstash.io:9092"},
-			Topic:   "kafka_test",
+			Brokers: []string{"csotv8fp02kgs1f19irg.any.eu-central-1.mpx.prd.cloud.redpanda.com:9092"},
+			Topic:   "tracktime",
 			Dialer: &kafka.Dialer{
 				SASLMechanism: mechanism,
 				TLS:           &tls.Config{},
@@ -164,6 +168,7 @@ func sendToKafka(message []byte, ctx *fiber.Ctx) error {
 
 		// Produce the message to Kafka
 		err = kafkaWriter.WriteMessages(ctx.Context(), kafka.Message{
+            
 			Value: message,
 		})
 
