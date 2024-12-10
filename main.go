@@ -191,7 +191,10 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
 
     decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Screenshot)
 
+
+    log.Printf("Size of image being uploaded: %d bytes", len(decodedScreenshot))
     if err != nil {
+        log.Printf("Base64 decode error for screenshot: %v", err)
         return fmt.Errorf("failed to decode base64 screenshot: %v", err)
     }
     // Specify the local directory where screenshots will be saved
@@ -214,7 +217,8 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
 
     // log.Printf("data",infoData.ActivityUUID,infoData.UserUID)
     // screenshotObjectKey := infoData.ScreenshotUID;
-    screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg";
+    // screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg";
+    screenshotObjectKey := fmt.Sprintf("screenshots/%s|%s.png", infoData.ActivityUUID, infoData.UserUID)
     log.Printf("infoData",infoData.ActivityUUID,infoData.UserUID,infoData.OrganizationID)
 
 	wasabiEndpoint := os.Getenv("S3_ENDPOINT");
@@ -293,9 +297,10 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
 	
 
 	if err != nil {
+        log.Printf("Error uploading image to Wasabi: %v", err)
         return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload screenshot to Wasabi: " + err.Error())
     }
-    
+    log.Printf("Image successfully uploaded to Wasabi: %s", screenshotObjectKey)
 	fmt.Println("Image uploaded");
 
     // Upload the screenshot to Wasabi as before
