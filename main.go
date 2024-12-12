@@ -144,8 +144,8 @@ func main() {
 
 func sendToKafka(message []byte, ctx *fiber.Ctx) error {
 	
-    userName := "trackTIme-2"
-    password := "9g72zV0EcLbA50v6jnnmfiFRvwqUKZ"
+    userName := os.Getenv("KAFKA_USER_NAME");
+    password := os.Getenv("KAFKA_PASSWORD");
 	mechanism, err := scram.Mechanism(scram.SHA256, userName, password)
     // userName := trackTIme-2
     // password :-9g72zV0EcLbA50v6jnnmfiFRvwqUKZ
@@ -154,8 +154,8 @@ func sendToKafka(message []byte, ctx *fiber.Ctx) error {
 		}
 
 		writerConfig := kafka.WriterConfig{
-			Brokers: []string{"csotv8fp02kgs1f19irg.any.eu-central-1.mpx.prd.cloud.redpanda.com:9092"},
-			Topic:   "tracktime",
+			Brokers: []string{os.Getenv("KAFKA_BROKER")},
+			Topic:   os.Getenv("TOPIC"),
 			Dialer: &kafka.Dialer{
 				SASLMechanism: mechanism,
 				TLS:           &tls.Config{},
