@@ -38,9 +38,6 @@ var (
 	batchMessages []string
 )
 
-
-// var producer sarama.SyncProducer // Upstash Kafka producer
-
 // JSON Data in go should contain capitalized keys for example `thumbnail` should not be like this it should be 
 // `Thumbnail`it should be capital not small and if it's small then go will not be able to read this data field because 
 // json marshal in go always reads the capitalize key's not small one at all learning 
@@ -67,6 +64,7 @@ type InfoData struct {
     CPUUsage           string    `json:"cpu_usage"`
     RAMUsage           string    `json:"ram_usage"`
     ScreenshotUID      string    `json:"screenshot_uid"`
+    ThumbnailUID       string    `json:"thumbnail_uid"` 
     Device_user_name   string    `json:"device_user_name"`
 }
 
@@ -76,31 +74,54 @@ func processData(infoData InfoData,ctx *fiber.Ctx) error {
     // Note: This function should NOT directly interact with `ctx`.
     // Instead, return errors for the caller to handle appropriately.
 
-    // Example:
-    err := uploadToWasabi(infoData,ctx)
+    // Generate and set the screenshot UID before uploading
+    screenshotUID := fmt.Sprintf("screenshots/%s|%s.png", infoData.ActivityUUID, infoData.UserUID)
+    thumbnailUID := fmt.Sprintf("thumbnails/%s|%s.jpeg", infoData.ActivityUUID, infoData.UserUID)
+
+    infoData.ScreenshotUID = screenshotUID
+    infoData.ThumbnailUID = thumbnailUID 
+
+    log.Printf("Processing data for user: %s, activity: %s", infoData.UserUID, infoData.ActivityUUID)
+    log.Printf("Screenshot UID set to: %s", infoData.ScreenshotUID)
+
+    // Upload screenshot to Wasabi
+    err := uploadToWasabi(infoData, ctx)
     if err != nil {
+        log.Printf("Failed to upload Screenshot to Wasabi: %v", err)
         return fmt.Errorf("failed to upload Screenshot to Wasabi: %v", err)
     }
 
-    err = uploadThumbnailToWasabi(infoData,ctx)
+    // Upload thumbnail to Wasabi
+    err = uploadThumbnailToWasabi(infoData, ctx)
     if err != nil {
+        log.Printf("Failed to upload Thumbnail to Wasabi: %v", err)
         return fmt.Errorf("failed to upload Thumbnail to Wasabi: %v", err)
     }
 
-    message, err := json.Marshal(infoData)
+    // Clear the base64 data before sending to Kafka to reduce message size
+    // but keep the ScreenshotUID for database storage
+    kafkaData := infoData
+    kafkaData.Screenshot = "" // Clear base64 data
+    kafkaData.Thumbnail = ""  // Clear base64 data
+    
+    log.Printf("Preparing Kafka message with screenshot_uid: %s", kafkaData.ScreenshotUID)
+
+    message, err := json.Marshal(kafkaData)
     if err != nil {
+        log.Printf("Failed to marshal infoData to JSON: %v", err)
         return fmt.Errorf("failed to marshal infoData to JSON: %v", err)
     }
 
-    // Assuming you have adapted your sendToKafka function to not require ctx as an argument
-    err = sendToKafka(message,ctx)
+    // Send to Kafka
+    err = sendToKafka(message, ctx)
     if err != nil {
+        log.Printf("Failed to send message to Kafka: %v", err)
         return fmt.Errorf("failed to send message to Kafka: %v", err)
     }
 
+    log.Printf("Data processed successfully for user: %s", infoData.UserUID)
     return nil
 }
-
 
 func main() {
     app := fiber.New()
@@ -113,6 +134,7 @@ func main() {
         var singleInfoData InfoData
         if err := json.Unmarshal(body, &singleInfoData); err == nil {
             // Handle single object
+            log.Printf("Processing single InfoData object")
             if err := processData(singleInfoData,ctx); err != nil {
                 log.Println("Error processing InfoData:", err)
                 return ctx.Status(fiber.StatusInternalServerError).SendString(err.Error())
@@ -124,7 +146,9 @@ func main() {
         var multipleInfoData []InfoData
         if err := json.Unmarshal(body, &multipleInfoData); err == nil {
             // Handle array of objects
-            for _, data := range multipleInfoData {
+            log.Printf("Processing array of %d InfoData objects", len(multipleInfoData))
+            for i, data := range multipleInfoData {
+                log.Printf("Processing object %d of %d", i+1, len(multipleInfoData))
                 if err := processData(data,ctx); err != nil {
                     log.Println("Error processing InfoData:", err)
                     return ctx.Status(fiber.StatusInternalServerError).SendString(err.Error())
@@ -134,51 +158,49 @@ func main() {
         }
 
         // If neither unmarshalling succeeded
+        log.Println("Invalid JSON format received")
         return ctx.Status(fiber.StatusBadRequest).SendString("Invalid JSON format")
     })
 
+    log.Println("Server starting on :8080...")
     log.Fatal(app.Listen(":8080"))
 }
 
-
-
 func sendToKafka(message []byte, ctx *fiber.Ctx) error {
 	
-    userName := os.Getenv("KAFKA_USER_NAME");
-    password := os.Getenv("KAFKA_PASSWORD");
+    userName := os.Getenv("KAFKA_USER_NAME")
+    password := os.Getenv("KAFKA_PASSWORD")
 	mechanism, err := scram.Mechanism(scram.SHA256, userName, password)
     // userName := trackTIme-2
     // password :-9g72zV0EcLbA50v6jnnmfiFRvwqUKZ
-		if err != nil {
-			log.Fatalf("Error creating SCRAM mechanism: %v", err)
-		}
+	if err != nil {
+		log.Fatalf("Error creating SCRAM mechanism: %v", err)
+	}
 
-		writerConfig := kafka.WriterConfig{
-			Brokers: []string{os.Getenv("KAFKA_BROKER")},
-			Topic:   os.Getenv("TOPIC"),
-			Dialer: &kafka.Dialer{
-				SASLMechanism: mechanism,
-				TLS:           &tls.Config{},
-			},
-		}
+	writerConfig := kafka.WriterConfig{
+		Brokers: []string{os.Getenv("KAFKA_BROKER")},
+		Topic:   os.Getenv("TOPIC"),
+		Dialer: &kafka.Dialer{
+			SASLMechanism: mechanism,
+			TLS:           &tls.Config{},
+		},
+	}
 
-		
-		kafkaWriter := kafka.NewWriter(writerConfig)
-		defer kafkaWriter.Close()
+	kafkaWriter := kafka.NewWriter(writerConfig)
+	defer kafkaWriter.Close()
 
-		// Produce the message to Kafka
-		err = kafkaWriter.WriteMessages(ctx.Context(), kafka.Message{
-            
-			Value: message,
-		})
+	// Produce the message to Kafka
+	err = kafkaWriter.WriteMessages(ctx.Context(), kafka.Message{
+		Value: message,
+	})
 
-		if err != nil {
-			return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to produce message to Kafka: " + err.Error())
-		}
-		
-		fmt.Println("Message produced to Kafka.")
-
-		return nil
+	if err != nil {
+		log.Printf("Failed to produce message to Kafka: %v", err)
+		return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to produce message to Kafka: " + err.Error())
+	}
+	
+	log.Printf("Message produced to Kafka successfully. Message size: %d bytes", len(message))
+	return nil
 }
 
 func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
@@ -190,7 +212,6 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
     // log.Printf("decodedThumbnail: %s",decodedThumbnail);
 
     decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Screenshot)
-
 
     log.Printf("Size of image being uploaded: %d bytes", len(decodedScreenshot))
     if err != nil {
@@ -213,22 +234,22 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
     log.Printf("Screenshot saved locally: %s", localFilePath)
 
     // screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|"+ infoData.UserUID + ".png"
-    log.Printf("screenshot name",infoData.ScreenshotUID);
+    log.Printf("screenshot name: %s", infoData.ScreenshotUID)
 
     // log.Printf("data",infoData.ActivityUUID,infoData.UserUID)
     // screenshotObjectKey := infoData.ScreenshotUID;
     // screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg";
     screenshotObjectKey := fmt.Sprintf("screenshots/%s|%s.png", infoData.ActivityUUID, infoData.UserUID)
-    log.Printf("infoData",infoData.ActivityUUID,infoData.UserUID,infoData.OrganizationID)
+    log.Printf("infoData - ActivityUUID: %s, UserUID: %s, OrganizationID: %s", infoData.ActivityUUID, infoData.UserUID, infoData.OrganizationID)
 
-	wasabiEndpoint := os.Getenv("S3_ENDPOINT");
-	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY"); 
-	wasabiSecretKey := os.Getenv("WASABI_SECRET_KEY"); 
-	wasabiBucket := os.Getenv("WASABI_BUCKET_NAME"); 
+	wasabiEndpoint := os.Getenv("S3_ENDPOINT")
+	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY")
+	wasabiSecretKey := os.Getenv("WASABI_SECRET_KEY")
+	wasabiBucket := os.Getenv("WASABI_BUCKET_NAME")
 
 	// wasabiObjectKey := "screenshots/" + time.Now().Format("2006-01-02/15-04-05") + ".png"
 
-	fmt.Println("Connecting to Wasabi...")
+	log.Println("Connecting to Wasabi...")
 
 	// Customize the HTTP client for AWS session with a timeout
     httpClient := &http.Client{
@@ -249,26 +270,17 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
 	 if err != nil {
 		 return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to create AWS session: " + err.Error())
 	 }
- 
-	
 
 	// Create an S3 client
 	s3Client := s3.New(sess)
 
-	fmt.Println("Connected to Wasabi.")
+	log.Println("Connected to Wasabi.")
 
 	// Create a bucket if it doesn't exist
 	_, err = s3Client.CreateBucket(&s3.CreateBucketInput{
 		Bucket: aws.String(wasabiBucket),
 	})
-	fmt.Println("Image uploading to wasabi.....");
-
-
-    
-
-	// if err != nil {
-	// 	return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to create Wasabi bucket: " + err.Error())
-	// }
+	log.Println("Image uploading to wasabi.....")
 
     if err != nil {
         if awsErr, ok := err.(awserr.Error); ok {
@@ -285,7 +297,7 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
         return fmt.Errorf("failed to upload screenshot to Wasabi: %v", err)
     }
 
-	fmt.Println("Image uploading Started");
+	log.Println("Image uploading Started")
 	
 	 // Upload the screenshot to Wasabi
 	 _, err = s3Client.PutObject(&s3.PutObjectInput{
@@ -295,13 +307,12 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
         ContentType: aws.String("image/png"),
     })
 	
-
 	if err != nil {
         log.Printf("Error uploading image to Wasabi: %v", err)
         return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload screenshot to Wasabi: " + err.Error())
     }
     log.Printf("Image successfully uploaded to Wasabi: %s", screenshotObjectKey)
-	fmt.Println("Image uploaded");
+	log.Println("Image uploaded")
 
     // Upload the screenshot to Wasabi as before
     log.Printf("Screenshot uploaded to Wasabi: %s", screenshotObjectKey)
@@ -318,8 +329,7 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
 
 func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
 
-
-    decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Thumbnail);
+    decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Thumbnail)
 
     if err != nil {
         log.Printf("Error decoding base64 data: %v", err)
@@ -341,16 +351,16 @@ func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
         return fmt.Errorf("failed to save thumbnail Screenshot locally: %v", err)
     }
 
-    log.Printf("Thumbnail saved locally: %s", localFilePathForThumbnail);
+    log.Printf("Thumbnail saved locally: %s", localFilePathForThumbnail)
 
-    screenshotObjectKey := "thumbnails/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg";
+    screenshotObjectKey := "thumbnails/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg"
 
-	wasabiEndpoint := os.Getenv("S3_ENDPOINT");
-	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY"); 
-	wasabiSecretKey := os.Getenv("WASABI_SECRET_KEY"); 
-	wasabiBucket := os.Getenv("WASABI_BUCKET_NAME"); 
+	wasabiEndpoint := os.Getenv("S3_ENDPOINT")
+	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY")
+	wasabiSecretKey := os.Getenv("WASABI_SECRET_KEY")
+	wasabiBucket := os.Getenv("WASABI_BUCKET_NAME")
 
-    fmt.Println("Connecting to Wasabi...")
+    log.Println("Connecting to Wasabi...")
 
 	// Customize the HTTP client for AWS session with a timeout
     httpClient := &http.Client{
@@ -375,14 +385,14 @@ func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
      //created a client for thumbnail uploading
      s3Client := s3.New(sess)
 
-    fmt.Println("Connected to Wasabi.")
+    log.Println("Connected to Wasabi.")
 
 	// Create a bucket if it doesn't exist
 	_, err = s3Client.CreateBucket(&s3.CreateBucketInput{
 		Bucket: aws.String(wasabiBucket),
 	})
 
-	fmt.Println("thumbnail uploading to wasabi.....");
+	log.Println("thumbnail uploading to wasabi.....")
 
     if err != nil {
         if awsErr, ok := err.(awserr.Error); ok {
@@ -399,7 +409,7 @@ func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
         return fmt.Errorf("failed to upload screenshot to Wasabi: %v", err)
     }
 
-    fmt.Println("thumbnail uploading Started");
+    log.Println("thumbnail uploading Started")
 	
 	 // Upload the screenshot to Wasabi
 	 _, err = s3Client.PutObject(&s3.PutObjectInput{
@@ -413,19 +423,13 @@ func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
         return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload thumbnail to Wasabi: " + err.Error())
     }
     
-	fmt.Println("thumbnail uploaded");
+	log.Println("thumbnail uploaded")
 
     // Upload the screenshot to Wasabi as before
     log.Printf("Thumbnail uploaded to Wasabi: %s", screenshotObjectKey)
 
     return nil
 }
-
-
-
-
-
-
 
 // func compressAndUploadImage(s3Client *s3.S3, bucketName, objectKey string, imageBuffer []byte) error {
 //     img, _, err := image.Decode(bytes.NewReader(imageBuffer))
