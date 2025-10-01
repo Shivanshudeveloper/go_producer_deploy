@@ -43,7 +43,8 @@ var (
 // json marshal in go always reads the capitalize key's not small one at all learning 
 // from experience and bug which took whole day to fix. day learned this thing --> 19/02/2024 by a learner
 
-type InfoData struct {
+// InfoData for receiving from Rust (with base64 data)
+type InfoDataFromRust struct {
     ActivityUUID       string    `json:"activity_uuid"`
     UserUID            string    `json:"user_id"`
     OrganizationID     string    `json:"organization_id"`
@@ -51,8 +52,8 @@ type InfoData struct {
     AppName            string    `json:"app_name"`
     URL                string    `json:"url"`
     PageTitle          string    `json:"page_title"`
-    Screenshot         string    `json:"screenshot"`
-    Thumbnail          string    `json:"thumbnail"`
+    ScreenshotWebP     string    `json:"screenshot_webp"`     // WebP base64 from Rust
+    ThumbnailJPEG      string    `json:"thumbnail_jpeg"`      // JPEG base64 from Rust
     ProductivityStatus string    `json:"productivity_status"`
     Meridian           string    `json:"meridian"`
     IPAddress          string    `json:"ip_address"`
@@ -63,63 +64,100 @@ type InfoData struct {
     Status             int       `json:"status"`
     CPUUsage           string    `json:"cpu_usage"`
     RAMUsage           string    `json:"ram_usage"`
-    ScreenshotUID      string    `json:"screenshot_uid"`
-    ThumbnailUID       string    `json:"thumbnail_uid"` 
+    ScreenshotUID      string    `json:"screenshot_uid"`      // WebP UID from Rust
+    ThumbnailUID       string    `json:"thumbnail_uid"`       // JPEG UID from Rust
+    Device_user_name   string    `json:"device_user_name"`
+}
+
+// InfoData for sending to Kafka (without base64 data)
+type InfoDataForKafka struct {
+    ActivityUUID       string    `json:"activity_uuid"`
+    UserUID            string    `json:"user_id"`
+    OrganizationID     string    `json:"organization_id"`
+    Timestamp          time.Time `json:"timestamp"`
+    AppName            string    `json:"app_name"`
+    URL                string    `json:"url"`
+    PageTitle          string    `json:"page_title"`
+    ProductivityStatus string    `json:"productivity_status"`
+    Meridian           string    `json:"meridian"`
+    IPAddress          string    `json:"ip_address"`
+    MacAddress         string    `json:"mac_address"`
+    MouseMovement      bool      `json:"mouse_movement"`
+    MouseClicks        int       `json:"mouse_clicks"`
+    KeysClicks         int       `json:"keys_clicks"`
+    Status             int       `json:"status"`
+    CPUUsage           string    `json:"cpu_usage"`
+    RAMUsage           string    `json:"ram_usage"`
+    ScreenshotUID      string    `json:"screenshot_uid"`      // ✅ Only UIDs for Kafka
+    ThumbnailUID       string    `json:"thumbnail_uid"`       // ✅ Only UIDs for Kafka
     Device_user_name   string    `json:"device_user_name"`
 }
 
 // processData handles the common logic for processing InfoData, whether it comes from a single object or an array.
-func processData(infoData InfoData,ctx *fiber.Ctx) error {
-    // Your logic for processing each InfoData, including uploading to Wasabi and sending to Kafka
-    // Note: This function should NOT directly interact with `ctx`.
-    // Instead, return errors for the caller to handle appropriately.
+func processData(infoData InfoDataFromRust, ctx *fiber.Ctx) error {
+    // ✅ USE: UIDs already provided by Rust desktop app
+    // Rust sends: screenshot_uid (WebP format) and thumbnail_uid (JPEG format)
+    // No need to generate new UIDs - use the ones from Rust
+    log.Printf("Using UIDs from Rust: ScreenshotUID=%s, ThumbnailUID=%s", infoData.ScreenshotUID, infoData.ThumbnailUID)
 
-    // Generate and set the screenshot UID before uploading
-    screenshotUID := fmt.Sprintf("screenshots/%s|%s.png", infoData.ActivityUUID, infoData.UserUID)
-    thumbnailUID := fmt.Sprintf("thumbnails/%s|%s.jpeg", infoData.ActivityUUID, infoData.UserUID)
+    log.Printf("✅ Processing data for user: %s, activity: %s", infoData.UserUID, infoData.ActivityUUID)
+    log.Printf("📸 WebP UID: %s", infoData.ScreenshotUID)
+    log.Printf("🖼️  JPEG UID: %s", infoData.ThumbnailUID)
 
-    infoData.ScreenshotUID = screenshotUID
-    infoData.ThumbnailUID = thumbnailUID 
-
-    log.Printf("Processing data for user: %s, activity: %s", infoData.UserUID, infoData.ActivityUUID)
-    log.Printf("Screenshot UID set to: %s", infoData.ScreenshotUID)
-
-    // Upload screenshot to Wasabi
-    err := uploadToWasabi(infoData, ctx)
+    // Upload WebP screenshot (full-size for list & detail views)
+    err := uploadWebPToWasabi(infoData, ctx)
     if err != nil {
-        log.Printf("Failed to upload Screenshot to Wasabi: %v", err)
-        return fmt.Errorf("failed to upload Screenshot to Wasabi: %v", err)
+        log.Printf("❌ Failed to upload WebP to Wasabi: %v", err)
+        return fmt.Errorf("failed to upload WebP to Wasabi: %v", err)
     }
 
-    // Upload thumbnail to Wasabi
-    err = uploadThumbnailToWasabi(infoData, ctx)
+    // Upload JPEG thumbnail (for fallback/download)
+    err = uploadJPEGThumbnailToWasabi(infoData, ctx)
     if err != nil {
-        log.Printf("Failed to upload Thumbnail to Wasabi: %v", err)
-        return fmt.Errorf("failed to upload Thumbnail to Wasabi: %v", err)
+        log.Printf("❌ Failed to upload JPEG thumbnail to Wasabi: %v", err)
+        return fmt.Errorf("failed to upload JPEG thumbnail to Wasabi: %v", err)
     }
 
-    // Clear the base64 data before sending to Kafka to reduce message size
-    // but keep the ScreenshotUID for database storage
-    kafkaData := infoData
-    kafkaData.Screenshot = "" // Clear base64 data
-    kafkaData.Thumbnail = ""  // Clear base64 data
+    // ✅ CREATE CLEAN MESSAGE: Remove base64 data, keep only UIDs
+    cleanData := InfoDataForKafka{
+        ActivityUUID:       infoData.ActivityUUID,
+        UserUID:            infoData.UserUID,
+        OrganizationID:     infoData.OrganizationID,
+        Timestamp:          infoData.Timestamp,
+        AppName:            infoData.AppName,
+        URL:                infoData.URL,
+        PageTitle:          infoData.PageTitle,
+        ProductivityStatus: infoData.ProductivityStatus,
+        Meridian:           infoData.Meridian,
+        IPAddress:          infoData.IPAddress,
+        MacAddress:         infoData.MacAddress,
+        MouseMovement:      infoData.MouseMovement,
+        MouseClicks:        infoData.MouseClicks,
+        KeysClicks:         infoData.KeysClicks,
+        Status:             infoData.Status,
+        CPUUsage:           infoData.CPUUsage,
+        RAMUsage:           infoData.RAMUsage,
+        ScreenshotUID:      infoData.ScreenshotUID,      // ✅ Only UIDs, no base64
+        ThumbnailUID:       infoData.ThumbnailUID,       // ✅ Only UIDs, no base64
+        Device_user_name:   infoData.Device_user_name,
+    }
     
-    log.Printf("Preparing Kafka message with screenshot_uid: %s", kafkaData.ScreenshotUID)
+    log.Printf("📨 Preparing clean Kafka message with UIDs: WebP=%s, JPEG=%s", cleanData.ScreenshotUID, cleanData.ThumbnailUID)
 
-    message, err := json.Marshal(kafkaData)
+    message, err := json.Marshal(cleanData)
     if err != nil {
-        log.Printf("Failed to marshal infoData to JSON: %v", err)
+        log.Printf("❌ Failed to marshal infoData to JSON: %v", err)
         return fmt.Errorf("failed to marshal infoData to JSON: %v", err)
     }
 
     // Send to Kafka
     err = sendToKafka(message, ctx)
     if err != nil {
-        log.Printf("Failed to send message to Kafka: %v", err)
+        log.Printf("❌ Failed to send message to Kafka: %v", err)
         return fmt.Errorf("failed to send message to Kafka: %v", err)
     }
 
-    log.Printf("Data processed successfully for user: %s", infoData.UserUID)
+    log.Printf("✅ Data processed successfully for user: %s", infoData.UserUID)
     return nil
 }
 
@@ -131,7 +169,7 @@ func main() {
 		body := ctx.Body()
 
         // Try to unmarshal the body into a single InfoData struct
-        var singleInfoData InfoData
+        var singleInfoData InfoDataFromRust
         if err := json.Unmarshal(body, &singleInfoData); err == nil {
             // Handle single object
             log.Printf("Processing single InfoData object")
@@ -143,7 +181,7 @@ func main() {
         }
 
         // Try to unmarshal the body into a slice of InfoData structs
-        var multipleInfoData []InfoData
+        var multipleInfoData []InfoDataFromRust
         if err := json.Unmarshal(body, &multipleInfoData); err == nil {
             // Handle array of objects
             log.Printf("Processing array of %d InfoData objects", len(multipleInfoData))
@@ -203,43 +241,28 @@ func sendToKafka(message []byte, ctx *fiber.Ctx) error {
 	return nil
 }
 
-func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
-
-    // log.Printf("thumbnailDataBase64 data: %s",infoData.Thumbnail);
-    
-	// decodedThumbnail, err := base64.StdEncoding.DecodeString(infoData.Thumbnail)
-
-    // log.Printf("decodedThumbnail: %s",decodedThumbnail);
-
-    decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Screenshot)
+// NEW: Upload WebP screenshot to Wasabi
+func uploadWebPToWasabi(infoData InfoDataFromRust, ctx *fiber.Ctx) error {
+    decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.ScreenshotWebP)
 
     log.Printf("Size of image being uploaded: %d bytes", len(decodedScreenshot))
     if err != nil {
         log.Printf("Base64 decode error for screenshot: %v", err)
         return fmt.Errorf("failed to decode base64 screenshot: %v", err)
     }
-    // Specify the local directory where screenshots will be saved
-    localDir := "./screenshots"
+    // Save locally (optional for debugging)
+    localDir := "./screenshots_webp"
     if err := os.MkdirAll(localDir, os.ModePerm); err != nil {
         return fmt.Errorf("failed to create local directory: %v", err)
     }
-
-    // Create a unique filename for the local screenshot
-    localFilePath := filepath.Join(localDir, fmt.Sprintf("%s.png", infoData.ActivityUUID))
-    
-    // Save the screenshot locally
+    localFilePath := filepath.Join(localDir, fmt.Sprintf("%s.webp", infoData.ActivityUUID))
     if err := ioutil.WriteFile(localFilePath, decodedScreenshot, 0644); err != nil {
-        return fmt.Errorf("failed to save screenshot locally: %v", err)
+        log.Printf("⚠️ Warning: Failed to save local copy: %v", err)
+    } else {
+        log.Printf("💾 Local copy saved: %s", localFilePath)
     }
-    log.Printf("Screenshot saved locally: %s", localFilePath)
 
-    // screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|"+ infoData.UserUID + ".png"
-    log.Printf("screenshot name: %s", infoData.ScreenshotUID)
-
-    // log.Printf("data",infoData.ActivityUUID,infoData.UserUID)
-    // screenshotObjectKey := infoData.ScreenshotUID;
-    // screenshotObjectKey := "screenshots/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg";
-    screenshotObjectKey := fmt.Sprintf("screenshots/%s|%s.png", infoData.ActivityUUID, infoData.UserUID)
+    screenshotObjectKey := infoData.ScreenshotUID  // Use the mapped WebP UID
     log.Printf("infoData - ActivityUUID: %s, UserUID: %s, OrganizationID: %s", infoData.ActivityUUID, infoData.UserUID, infoData.OrganizationID)
 
 	wasabiEndpoint := os.Getenv("S3_ENDPOINT")
@@ -297,25 +320,22 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
         return fmt.Errorf("failed to upload screenshot to Wasabi: %v", err)
     }
 
-	log.Println("Image uploading Started")
+	log.Println("📤 WebP upload started...")
 	
-	 // Upload the screenshot to Wasabi
+	 // Upload the WebP to Wasabi with correct ContentType and caching
 	 _, err = s3Client.PutObject(&s3.PutObjectInput{
-        Bucket:      aws.String(wasabiBucket),
-        Key:         aws.String(screenshotObjectKey),
-        Body:        bytes.NewReader(decodedScreenshot),
-        ContentType: aws.String("image/png"),
+        Bucket:       aws.String(wasabiBucket),
+        Key:          aws.String(screenshotObjectKey),
+        Body:         bytes.NewReader(decodedScreenshot),
+        ContentType:  aws.String("image/webp"),
+        CacheControl: aws.String("public, max-age=31536000"), // 1 year cache
     })
 	
 	if err != nil {
-        log.Printf("Error uploading image to Wasabi: %v", err)
-        return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload screenshot to Wasabi: " + err.Error())
+        log.Printf("❌ Error uploading WebP to Wasabi: %v", err)
+        return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload WebP to Wasabi: " + err.Error())
     }
-    log.Printf("Image successfully uploaded to Wasabi: %s", screenshotObjectKey)
-	log.Println("Image uploaded")
-
-    // Upload the screenshot to Wasabi as before
-    log.Printf("Screenshot uploaded to Wasabi: %s", screenshotObjectKey)
+    log.Printf("✅ WebP uploaded successfully: %s (%d bytes)", screenshotObjectKey, len(decodedScreenshot))
 
     // // After uploading the original image successfully
     // err = compressAndUploadImage(s3Client, wasabiBucket, screenshotObjectKey, decodedScreenshot)
@@ -327,33 +347,30 @@ func uploadToWasabi(infoData InfoData,ctx *fiber.Ctx) error {
     return nil
 }
 
-func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
-
-    decodedScreenshot, err := base64.StdEncoding.DecodeString(infoData.Thumbnail)
+// NEW: Upload JPEG thumbnail to Wasabi
+func uploadJPEGThumbnailToWasabi(infoData InfoDataFromRust, ctx *fiber.Ctx) error {
+    decodedThumbnail, err := base64.StdEncoding.DecodeString(infoData.ThumbnailJPEG)
 
     if err != nil {
         log.Printf("Error decoding base64 data: %v", err)
         return err
     }
 
-    // if err != nil {
-    //     return fmt.Errorf("failed to decode base64 screenshot for thumbnail: %v", err)
-    // }
+    log.Printf("📏 Thumbnail size: %d bytes", len(decodedThumbnail))
 
-    localDir := "./thumbnailFolder"
+    // Save locally (optional for debugging)
+    localDir := "./thumbnails_jpeg"
     if err := os.MkdirAll(localDir, os.ModePerm); err != nil {
         return fmt.Errorf("failed to create local directory for thumbnail: %v", err)
     }
-
-    localFilePathForThumbnail := filepath.Join(localDir, fmt.Sprintf("%s.jpeg", infoData.ActivityUUID))
-
-    if err := ioutil.WriteFile(localFilePathForThumbnail, decodedScreenshot, 0644); err != nil {
-        return fmt.Errorf("failed to save thumbnail Screenshot locally: %v", err)
+    localFilePathForThumbnail := filepath.Join(localDir, fmt.Sprintf("%s.jpg", infoData.ActivityUUID))
+    if err := ioutil.WriteFile(localFilePathForThumbnail, decodedThumbnail, 0644); err != nil {
+        log.Printf("⚠️ Warning: Failed to save local thumbnail: %v", err)
+    } else {
+        log.Printf("💾 Local thumbnail saved: %s", localFilePathForThumbnail)
     }
 
-    log.Printf("Thumbnail saved locally: %s", localFilePathForThumbnail)
-
-    screenshotObjectKey := "thumbnails/" + infoData.ActivityUUID + "|" + infoData.UserUID + ".jpeg"
+    thumbnailObjectKey := infoData.ThumbnailUID  // Use the mapped JPEG UID
 
 	wasabiEndpoint := os.Getenv("S3_ENDPOINT")
 	wasabiAccessKey := os.Getenv("WASABI_ACCESS_KEY")
@@ -409,25 +426,23 @@ func uploadThumbnailToWasabi(infoData InfoData, ctx*fiber.Ctx) error {
         return fmt.Errorf("failed to upload screenshot to Wasabi: %v", err)
     }
 
-    log.Println("thumbnail uploading Started")
+    log.Println("📤 JPEG thumbnail upload started...")
 	
-	 // Upload the screenshot to Wasabi
+	 // Upload the JPEG thumbnail to Wasabi
 	 _, err = s3Client.PutObject(&s3.PutObjectInput{
-        Bucket:      aws.String(wasabiBucket),
-        Key:         aws.String(screenshotObjectKey),
-        Body:        bytes.NewReader(decodedScreenshot),
-        ContentType: aws.String("image/jpeg"),
+        Bucket:       aws.String(wasabiBucket),
+        Key:          aws.String(thumbnailObjectKey),
+        Body:         bytes.NewReader(decodedThumbnail),
+        ContentType:  aws.String("image/jpeg"),
+        CacheControl: aws.String("public, max-age=31536000"), // 1 year cache
     })
 
     if err != nil {
-        return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload thumbnail to Wasabi: " + err.Error())
+        log.Printf("❌ Error uploading JPEG thumbnail to Wasabi: %v", err)
+        return ctx.Status(fiber.StatusInternalServerError).SendString("Failed to upload JPEG thumbnail to Wasabi: " + err.Error())
     }
     
-	log.Println("thumbnail uploaded")
-
-    // Upload the screenshot to Wasabi as before
-    log.Printf("Thumbnail uploaded to Wasabi: %s", screenshotObjectKey)
-
+    log.Printf("✅ JPEG thumbnail uploaded successfully: %s (%d bytes)", thumbnailObjectKey, len(decodedThumbnail))
     return nil
 }
 
